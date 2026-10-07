@@ -1,0 +1,6 @@
+# CPU 构建从 PyTorch 官方索引获取；+cpu 防止误装 CUDA 构建。
+--extra-index-url https://download.pytorch.org/whl/cpu
+yt-dlp[default]==2026.8.19
+torch==2.10.0+cpu
+torchcodec==0.10.0
+numpy==2.5.3
