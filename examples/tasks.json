@@ -1,0 +1,21 @@
+{
+  "tasks": [
+    {
+      "id": "short-full",
+      "url": "https://www.w3schools.com/html/mov_bbb.mp4",
+      "mode": "full"
+    },
+    {
+      "id": "intentional-404",
+      "url": "https://www.w3schools.com/html/video-tensor-intentional-missing.mp4",
+      "mode": "full"
+    },
+    {
+      "id": "short-section",
+      "url": "https://www.w3schools.com/html/mov_bbb.mp4",
+      "mode": "section",
+      "start_time": 2,
+      "end_time": 5
+    }
+  ]
+}

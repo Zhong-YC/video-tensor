@@ -43,6 +43,33 @@ def _open_decoder(video_path: Path) -> VideoDecoder:
     return decoder
 
 
+
+@dataclass(frozen=True)
+class VideoInfo:
+    duration_seconds: float
+    begin_seconds: float
+    num_frames: int
+    width: int
+    height: int
+    boundary_frame_duration: float
+
+
+def inspect_video(video_path: Path) -> VideoInfo:
+    """扫描元信息并解码首末帧；不把整个视频加载为 Tensor。"""
+    decoder = _open_decoder(video_path)
+    first = decoder.get_frame_at(0)
+    last = decoder.get_frame_at(len(decoder) - 1)
+    begin = decoder.metadata.begin_stream_seconds
+    end = decoder.metadata.end_stream_seconds
+    if begin is None or end is None or not math.isfinite(end - begin) or end <= begin:
+        raise RuntimeError("无法确定有效的视频流时长。")
+    return VideoInfo(
+        duration_seconds=end - begin, begin_seconds=begin, num_frames=len(decoder),
+        width=first.data.shape[2], height=first.data.shape[1],
+        boundary_frame_duration=max(first.duration_seconds, last.duration_seconds),
+    )
+
+
 def read_first_frame(video_path: Path) -> FirstFrameResult:
     """仅返回第一帧像素；精确索引模式可能扫描文件以建立帧索引。"""
     decoder = _open_decoder(video_path)
