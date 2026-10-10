@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 from typing import Iterator, Literal
 
+from decode_guard import DecodeCancelled, DecodeDecision
 from decoder import VideoClip, inspect_video, print_clip_summary, read_video_clip, validate_time_range
 
 
@@ -25,6 +26,7 @@ class DecodedItem:
     status: Literal["success", "failed", "skipped"]
     clip: VideoClip | None = None
     error: str | None = None
+    skip_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,7 @@ def load_download_results(results_path: Path) -> list[DownloadedEntry]:
 def _decode_one(
     entry: DownloadedEntry, index: int, total: int,
     full_start_time: float | None, full_end_time: float | None,
+    before_decode: DecodeDecision | None = None,
 ) -> DecodedItem:
     if entry.download_status != "success":
         return DecodedItem(index, total, entry, "skipped")
@@ -110,8 +113,13 @@ def _decode_one(
             start, end = 0.0, inspect_video(entry.path).duration_seconds
         else:
             start, end = full_start_time, full_end_time
-        clip = read_video_clip(entry.path, start, end)
+        decode_options = {"before_decode": before_decode} if before_decode is not None else {}
+        clip = read_video_clip(entry.path, start, end, **decode_options)
         return DecodedItem(index, total, entry, "success", clip=clip)
+    except DecodeCancelled as exc:
+        return DecodedItem(index, total, entry, "skipped", skip_reason=str(exc))
+    except MemoryError:
+        return DecodedItem(index, total, entry, "failed", error="解码时内存不足；视频文件保留。")
     except (ImportError, OSError, ValueError, RuntimeError) as exc:
         return DecodedItem(index, total, entry, "failed", error=str(exc))
 
@@ -120,8 +128,9 @@ def iter_decoded_results(
     results_path: Path, *,
     full_start_time: float | None = None,
     full_end_time: float | None = None,
+    before_decode: DecodeDecision | None = None,
 ) -> Iterator[DecodedItem]:
-    """默认整段解码；可为 full 项指定区间。调用方应及时处理并释放当前项。"""
+    """默认整段；before_decode 返回 False 则跳过当前项。调用方应及时释放 Tensor。"""
     if (full_start_time is None) != (full_end_time is None):
         raise ValueError("--full-start-time 和 --full-end-time 必须同时提供。")
     if full_start_time is not None:
@@ -134,19 +143,21 @@ def iter_decoded_results(
     entries = load_download_results(results_path)
     for index, entry in enumerate(entries, start=1):
         # 不在生成器中保留上一项 Tensor；yield 后由调用方持有当前结果。
-        yield _decode_one(entry, index, len(entries), full_start_time, full_end_time)
+        yield _decode_one(entry, index, len(entries), full_start_time, full_end_time, before_decode)
 
 
 def run_batch_decode(
     results_path: Path, *,
     full_start_time: float | None = None,
     full_end_time: float | None = None,
+    before_decode: DecodeDecision | None = None,
 ) -> BatchDecodeSummary:
     """CLI 消费生成器：打印摘要，释放当前项，再解码下一条。"""
     succeeded = failed = skipped = 0
     cancelled = False
     stream = iter_decoded_results(
         results_path, full_start_time=full_start_time, full_end_time=full_end_time,
+        before_decode=before_decode,
     )
     print(f"读取下载汇总：{results_path.expanduser().resolve()}", flush=True)
     try:
@@ -162,7 +173,8 @@ def run_batch_decode(
                     print(f"解码失败：{item.entry.id}：{item.error}", file=sys.stderr, flush=True)
                 else:
                     skipped += 1
-                    print(f"跳过：下载状态为 {item.entry.download_status}。", flush=True)
+                    reason = item.skip_reason or f"下载状态为 {item.entry.download_status}。"
+                    print(f"跳过：{reason}", flush=True)
             finally:
                 # 只保留计数，不把多条视频的 Tensor 累积在列表里。
                 del item

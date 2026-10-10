@@ -210,6 +210,69 @@ class BatchDecodeTests(unittest.TestCase):
         self.assertEqual(len(started), 2)
         self.assertEqual((summary.succeeded, summary.cancelled, summary.exit_code), (1, True, 130))
 
+    def test_api_callback_can_skip_middle_and_continue_later_video(self):
+        self.write_results([
+            self.record("first", "full", path=self.full),
+            self.record("middle", "full", path=self.full),
+            self.record("last"),
+        ])
+        decisions = iter([True, False, True])
+        estimates = []
+        def decide(estimate):
+            estimates.append(estimate)
+            return next(decisions)
+        before = self.results.read_bytes()
+        with patch("builtins.input", side_effect=AssertionError("API must not read input")):
+            items = list(iter_decoded_results(self.results, before_decode=decide))
+        self.assertEqual([item.status for item in items], ["success", "skipped", "success"])
+        self.assertIsNone(items[1].clip)
+        self.assertIn("取消", items[1].skip_reason)
+        self.assertEqual([estimate.num_frames for estimate in estimates], [40, 40, 10])
+        self.assertEqual(self.results.read_bytes(), before)
+
+    def test_real_cli_cancel_middle_then_decode_small_section_and_selected_range(self):
+        self.write_results([
+            self.record("first", "full", path=self.full),
+            self.record("middle", "full", path=self.full),
+            self.record("last"),
+        ])
+        project = Path(__file__).resolve().parents[1]
+        command = [
+            sys.executable, "-X", "utf8", str(project / "main.py"), "decode-batch",
+            str(self.results), "--warn-memory-gib", "0.0005",
+        ]
+        before = self.results.read_bytes()
+        result = subprocess.run(command, input="n\ny\n", capture_output=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("是否取消本次解码"), 2)
+        self.assertIn("成功 2，失败 0，跳过 1", result.stdout)
+        self.assertIn("跳过：已取消当前视频的解码", result.stdout)
+        self.assertNotIn("跳过：下载状态为 success", result.stdout)
+        self.assertIn("取消：否", result.stdout)
+        self.assertIn("(10, 3, 64, 96)", result.stdout)
+        # 同一完整文件只选 1 秒后低于阈值，EOF 输入也不应触发询问或跳过。
+        selected = subprocess.run(
+            command + ["--full-start-time", "1", "--full-end-time", "2"],
+            input="", capture_output=True, encoding="utf-8", timeout=30,
+        )
+        self.assertEqual(selected.returncode, 0, selected.stdout + selected.stderr)
+        self.assertNotIn("是否取消本次解码", selected.stdout)
+        self.assertIn("成功 3，失败 0，跳过 0", selected.stdout)
+        self.assertEqual(self.results.read_bytes(), before)
+
+    def test_memory_allocation_failure_is_reported_and_later_task_continues(self):
+        self.write_results([
+            self.record("first"), self.record("memory-failure"), self.record("last"),
+        ])
+        clip = read_video_clip(self.section)
+        for error in (MemoryError(), RuntimeError("CPU allocation failed")):
+            stderr = io.StringIO()
+            with patch("batch_decoder.read_video_clip", side_effect=[clip, error, clip]):
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    summary = run_batch_decode(self.results)
+            self.assertEqual((summary.succeeded, summary.failed, summary.skipped), (2, 1, 0))
+            self.assertTrue(stderr.getvalue().strip())
+
     def test_real_cli_does_not_save_pt_or_modify_download_results(self):
         self.write_results([
             self.record("full", "full", path=self.full),

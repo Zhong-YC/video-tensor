@@ -5,11 +5,13 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 import torch
 from torchcodec.decoders import VideoDecoder
 
 from decoder import read_video_clip
+from decode_guard import DecodeCancelled
 
 
 class VideoClipTests(unittest.TestCase):
@@ -82,6 +84,52 @@ class VideoClipTests(unittest.TestCase):
                         self.assertIn('torch.uint8', result.stdout)
                     else:
                         self.assertIn('必须同时提供', result.stderr)
+
+    def test_estimate_matches_actual_selected_pixels_with_variable_rate_and_offset(self):
+        for path in self.paths:
+            for start, end in ((None, None), (.2, .5), (.21, .59)):
+                with self.subTest(video=path.stem, start=start, end=end):
+                    estimates = []
+                    with patch("builtins.input", side_effect=AssertionError("API must not read input")):
+                        clip = read_video_clip(
+                            path, start, end, before_decode=lambda estimate: estimates.append(estimate) or True,
+                        )
+                    estimate = estimates[0]
+                    self.assertEqual(estimate.num_frames, clip.data.shape[0])
+                    self.assertEqual(estimate.pixel_bytes, clip.data.numel() * clip.data.element_size())
+                    self.assertEqual((estimate.start_time, estimate.end_time), (clip.start_time, clip.end_time))
+                    self.assertEqual(estimate.video_path, path.resolve())
+        # API 默认不提供回调也不会等待键盘输入。
+        with patch("builtins.input", side_effect=AssertionError("API must not read input")):
+            read_video_clip(self.paths[0])
+
+    def test_rejected_estimate_prevents_bulk_pixel_allocation(self):
+        # 只替换批量分配方法；不让 Mock 的返回值继续持有真实解码器及文件句柄。
+        with patch.object(VideoDecoder, "get_frames_played_in_range") as allocate:
+            with self.assertRaises(DecodeCancelled):
+                read_video_clip(self.paths[0], .2, .5, before_decode=lambda estimate: False)
+            allocate.assert_not_called()
+        self.assertTrue(self.paths[0].is_file())
+
+    def test_cli_confirmation_cancels_or_continues_actual_decode(self):
+        root = Path(__file__).resolve().parents[1]
+        for entry in (["main.py", "local"], ["decoder.py"]):
+            command = [
+                sys.executable, "-X", "utf8", *entry, str(self.paths[0]),
+                "--warn-memory-gib", "0.000000001",
+            ]
+            for answer, code in (("y\n", 130), ("n\n", 0)):
+                with self.subTest(entry=entry, answer=answer):
+                    result = subprocess.run(
+                        command, cwd=root, input=answer, capture_output=True, encoding="utf-8", timeout=30,
+                    )
+                    self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                    self.assertIn("是否取消本次解码", result.stdout)
+                    if code == 0:
+                        self.assertIn("(10, 3, 48, 64)", result.stdout)
+                    else:
+                        self.assertNotIn("Tensor shape", result.stdout)
+                        self.assertIn("文件保留", result.stdout)
 
     def test_invalid_ranges(self):
         for start, end in [(None, 1), (0, None), (-1, 1), (0, 0), (1, 0), (0, 2), (float("nan"), 1), (0, float("inf"))]:

@@ -15,7 +15,7 @@ from downloader import DownloadMode, download_video, validate_download_options
 class DownloadTask:
     id: str
     url: str
-    mode: DownloadMode
+    mode: DownloadMode = "full"
     start_time: float | None = None
     end_time: float | None = None
     max_height: int | None = None
@@ -73,7 +73,7 @@ def load_tasks(manifest_path: Path) -> list[DownloadTask]:
                 raise ValueError("任务必须是 JSON 对象。")
             if unknown := set(entry) - allowed:
                 raise ValueError(f"不支持的字段：{', '.join(sorted(unknown))}。")
-            if missing := {"id", "url", "mode"} - set(entry):
+            if missing := {"id", "url"} - set(entry):
                 raise ValueError(f"缺少字段：{', '.join(sorted(missing))}。")
             task_id = entry["id"]
             if not isinstance(task_id, str) or not task_id.strip():
@@ -81,16 +81,21 @@ def load_tasks(manifest_path: Path) -> list[DownloadTask]:
             task_id = task_id.strip()
             if task_id in task_ids:
                 raise ValueError(f"id 重复：{task_id}。")
-            if entry["mode"] == "full" and ({"start_time", "end_time"} & set(entry)):
-                raise ValueError("full 任务不接受时间字段；只下载片段请使用 section。")
+            mode = entry.get("mode", "full")
+            # 省略字段与 JSON null 均表示没有指定该时间。
+            start_time, end_time = entry.get("start_time"), entry.get("end_time")
+            if (start_time is None) != (end_time is None):
+                raise ValueError("start_time 和 end_time 必须同时提供有效数值或同时留空。")
+            if mode == "full" and start_time is not None:
+                raise ValueError("full 任务不接受下载区间；只下载片段请使用 section。")
             url = validate_download_options(
-                entry["url"], mode=entry["mode"],
-                start_time=entry.get("start_time"), end_time=entry.get("end_time"),
+                entry["url"], mode=mode,
+                start_time=start_time, end_time=end_time,
                 max_height=entry.get("max_height"),
             )
             tasks.append(DownloadTask(
-                id=task_id, url=url, mode=entry["mode"],
-                start_time=entry.get("start_time"), end_time=entry.get("end_time"),
+                id=task_id, url=url, mode=mode,
+                start_time=start_time, end_time=end_time,
                 max_height=entry.get("max_height"),
             ))
             task_ids.add(task_id)

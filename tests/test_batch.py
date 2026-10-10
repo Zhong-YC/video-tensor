@@ -8,7 +8,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from batch import load_tasks, run_batch
+from batch import DownloadTask, load_tasks, run_batch
+from batch_decoder import load_download_results
 from downloader import DownloadResult
 
 
@@ -39,6 +40,50 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(loaded[1].start_time, 4800.5)
         self.assertEqual(loaded[1].max_height, 360)
 
+    def test_default_mode_and_empty_times_are_full(self):
+        variants = [{}, {"start_time": None}, {"end_time": None},
+                    {"start_time": None, "end_time": None}]
+        for explicit_mode in (False, True):
+            for times in variants:
+                task = {"id": "default", "url": "https://example.com/video", **times}
+                if explicit_mode:
+                    task["mode"] = "full"
+                with self.subTest(task=task):
+                    loaded = load_tasks(self.write_tasks([task]))[0]
+                    self.assertEqual(loaded.mode, "full")
+                    self.assertIsNone(loaded.start_time)
+                    self.assertIsNone(loaded.end_time)
+        self.assertEqual(DownloadTask("default", "https://example.com/video").mode, "full")
+        section = self.task("zero-start", mode="section", start_time=0, end_time=1)
+        loaded = load_tasks(self.write_tasks([section]))[0]
+        self.assertEqual((loaded.mode, loaded.start_time, loaded.end_time), ("section", 0, 1))
+
+    def test_default_tasks_round_trip_to_download_results_and_retry(self):
+        tasks = [
+            {"id": "omitted", "url": "https://example.com/video"},
+            {"id": "null", "url": "https://example.com/video", "start_time": None, "end_time": None},
+            self.task("explicit-null", start_time=None, end_time=None),
+        ]
+        def download(url, output, **kwargs):
+            self.assertEqual(kwargs["mode"], "full")
+            self.assertIsNone(kwargs["start_time"])
+            self.assertIsNone(kwargs["end_time"])
+            output.mkdir()
+            path = output / "video.mp4"
+            path.write_bytes(b"download-result-fixture")
+            return DownloadResult(path, "fixture")
+        with patch("batch.download_video", side_effect=download), redirect_stdout(io.StringIO()):
+            result = run_batch(self.write_tasks(tasks), self.root / "downloads")
+        self.assertEqual((result.succeeded, result.failed, result.exit_code), (3, 0, 0))
+        # 汇总仍明确写入 full，供后续 decode-batch 及复制清单重试使用。
+        document = json.loads(result.summary_path.read_text(encoding="utf-8"))
+        normalized = [record["task"] for record in document["tasks"]]
+        self.assertTrue(all(task["mode"] == "full" for task in normalized))
+        self.assertTrue(all("start_time" not in task and "end_time" not in task for task in normalized))
+        entries = load_download_results(result.summary_path)
+        self.assertEqual([entry.mode for entry in entries], ["full"] * 3)
+        self.assertEqual([task.mode for task in load_tasks(self.write_tasks(normalized))], ["full"] * 3)
+
     def test_invalid_later_task_prevents_all_downloads(self):
         bad_tasks = [
             {},
@@ -51,7 +96,12 @@ class BatchTests(unittest.TestCase):
             self.task("bad", mode="section", start_time=-1, end_time=5),
             self.task("bad", mode="section", start_time=5, end_time=2),
             self.task("bad", mode="section", start_time=0, end_time=10**400),
-            self.task("bad", start_time=None),
+            self.task("bad", start_time=None, end_time=5),
+            self.task("bad", start_time=0, end_time=None),
+            self.task("bad", start_time=0, end_time=1),
+            self.task("bad", mode=None),
+            self.task("bad", mode="section", start_time=None, end_time=None),
+            {"id": "bad", "url": "https://example.com/video", "start_time": 0, "end_time": 1},
             self.task("bad", max_height=True),
             self.task("bad", max_height=0),
             self.task("bad", decode=True),

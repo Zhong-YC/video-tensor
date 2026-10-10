@@ -4,6 +4,8 @@
 
 以下命令均在项目根目录运行。
 
+全部成功示例的第一项仅填写 id 和 url，省略 mode 和时间，默认完整下载。显式填写 full 也可；时间字段省略或 null 均表示未指定时间。section 任务仍须填写有效的起止时间。
+
 ## 中间失败，前后成功：tasks.json
 
 | 顺序 | id | 任务说明 | 预期状态 |
@@ -68,3 +70,13 @@ $LASTEXITCODE
 ```
 
 此时 full 视频为 75 帧，section 片段仍为 75 帧。两个时间参数必须同时提供或同时省略。Tensor 逐条在内存中生成并输出摘要，不保存 .pt，不修改下载汇总；长视频默认整体解码，需要相应可用内存。
+
+解码前按实际目标区间估计像素内存，默认达到 2 GiB 时询问“是否取消本次解码”：y/yes 跳过当前项，n/no 继续。两份短视频示例均低于默认阈值，不会询问。选择跳过的项单独计入 skipped，后续任务继续，视频文件及下载汇总保留。
+
+无人值守运行时，可明确选择仅跳过达到阈值的项：
+
+```powershell
+.\.venv\Scripts\python.exe main.py decode-batch "实际输出目录/results.json" --warn-memory-gib 2 --large-decode-action skip
+```
+
+完整参数与 Python API 回调见项目 README 第 4.6、5.5 节。

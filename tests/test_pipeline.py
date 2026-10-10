@@ -12,6 +12,8 @@ import torch
 from torchcodec.decoders import VideoDecoder
 
 from downloader import DownloadResult
+from decoder import inspect_video
+from decode_guard import DecodeCancelled
 from main import main
 from pipeline import video_url_to_tensor
 
@@ -85,12 +87,69 @@ class PipelineTests(unittest.TestCase):
                     self.assertEqual((result.clip.start_time, result.clip.end_time), (actual_start, actual_end))
                     self.assertEqual(result.download.path, path)
 
+    def test_api_truly_omitted_mode_and_times_decodes_whole(self):
+        for path in self.paths:
+            expected = VideoDecoder(str(path)).get_frames_at(list(range(40))).data
+            for options in ({}, {"output_dir": self.base},
+                            {"output_dir": self.base, "start_time": None, "end_time": None}):
+                with self.subTest(video=path.stem, options=options):
+                    with patch("pipeline.download_video", return_value=DownloadResult(path, "fixture")) as download:
+                        result = video_url_to_tensor("https://example.com/video", **options)
+                    self.assertTrue(torch.equal(result.clip.data, expected))
+                    self.assertEqual((result.clip.start_time, result.clip.end_time), (0, 4))
+                    self.assertEqual(download.call_args.kwargs["mode"], "full")
+                    self.assertEqual(
+                        download.call_args.args[1],
+                        options.get("output_dir", Path(__file__).resolve().parents[1] / "work" / "downloads"),
+                    )
+            # 默认 full 下提供区间仍是完整下载后局部解码。
+            with patch("pipeline.download_video", return_value=DownloadResult(path, "fixture")) as download:
+                selected = video_url_to_tensor(
+                    "https://example.com/video", start_time=1, end_time=2, output_dir=self.base,
+                )
+            self.assertTrue(torch.equal(selected.clip.data, expected[10:20]))
+            self.assertEqual(download.call_args.kwargs["mode"], "full")
+        with patch("pipeline.download_video") as download:
+            for options in ({"mode": "section"}, {"start_time": 0}, {"end_time": 1}):
+                with self.subTest(invalid_options=options), self.assertRaises(ValueError):
+                    video_url_to_tensor("https://example.com/video", output_dir=self.base, **options)
+            download.assert_not_called()
+
+    def test_callback_uses_local_target_interval_and_cancel_keeps_download(self):
+        path = self.paths[0]
+        original = path.read_bytes()
+        info = inspect_video(path)
+        for mode, start, end, expected in (
+            ("full", None, None, (0, 4, 40)),
+            ("full", 1, 2, (1, 2, 10)),
+            ("section", 4800, 4804, (0, 4, 40)),
+        ):
+            with self.subTest(mode=mode):
+                estimates = []
+                downloaded = DownloadResult(path, "fixture", mode=mode, video_info=info)
+                with patch("pipeline.download_video", return_value=downloaded):
+                    result = video_url_to_tensor(
+                        "https://example.com/video", start, end, self.base, mode=mode,
+                        before_decode=lambda estimate: estimates.append(estimate) or True,
+                    )
+                estimate = estimates[0]
+                self.assertEqual((estimate.start_time, estimate.end_time, estimate.num_frames), expected)
+                self.assertEqual(result.clip.data.shape[0], expected[2])
+                with patch("pipeline.download_video", return_value=downloaded):
+                    with self.assertRaisesRegex(DecodeCancelled, "文件保留"):
+                        video_url_to_tensor(
+                            "https://example.com/video", start, end, self.base, mode=mode,
+                            before_decode=lambda estimate: False,
+                        )
+        self.assertEqual(path.read_bytes(), original)
+
     def test_single_download_cli_whole_range_and_invalid_options(self):
         path = self.paths[0]
         original = path.read_bytes()
-        command = ["main.py", "download", "https://example.com/video", "--mode", "full"]
+        command = ["main.py", "download", "https://example.com/video"]
         for options, shape in (
             (["--decode"], "(40, 3, 64, 96)"),
+            (["--mode", "full", "--decode"], "(40, 3, 64, 96)"),
             (["--decode", "--start-time", "1", "--end-time", "2"], "(10, 3, 64, 96)"),
         ):
             with self.subTest(options=options):
@@ -103,6 +162,7 @@ class PipelineTests(unittest.TestCase):
         for options in (
             ["--decode", "--start-time", "1"],
             ["--decode", "--mode", "section"],
+            ["--mode", "section"],
             ["--start-time", "1", "--end-time", "2"],
         ):
             with self.subTest(invalid_options=options):
@@ -112,6 +172,13 @@ class PipelineTests(unittest.TestCase):
                             main()
                         self.assertEqual(error.exception.code, 2)
                         download.assert_not_called()
+        # 连模式和时间一起省略的纯下载 CLI 也必须选择 full。
+        with patch("sys.argv", command), redirect_stdout(io.StringIO()):
+            with patch("main.download_video", return_value=DownloadResult(path, "fixture")) as download:
+                self.assertEqual(main(), 0)
+        self.assertEqual(download.call_args.kwargs["mode"], "full")
+        self.assertIsNone(download.call_args.kwargs["start_time"])
+        self.assertIsNone(download.call_args.kwargs["end_time"])
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual(list(self.base.glob("*.pt")), [])
 

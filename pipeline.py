@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from decode_guard import DecodeDecision
+
 from decoder import VideoClip, inspect_video, read_video_clip, validate_time_range
 from downloader import DownloadMode, DownloadResult, download_video
 
@@ -14,10 +16,14 @@ class VideoResult:
 
 
 def video_url_to_tensor(
-    url: str, start_time: float | None, end_time: float | None, output_dir: Path,
-    *, mode: DownloadMode = "section", max_height: int | None = None,
+    url: str,
+    start_time: float | None = None,
+    end_time: float | None = None,
+    output_dir: Path = Path(__file__).resolve().parent / "work" / "downloads",
+    *, mode: DownloadMode = "full", max_height: int | None = None,
+    before_decode: DecodeDecision | None = None,
 ) -> VideoResult:
-    """section 只下载区间；full 可传 None, None 解码全部，或指定本地区间。"""
+    """默认完整下载并整段解码；before_decode 返回 False 时取消解码并保留视频。"""
     if (start_time is None) != (end_time is None):
         raise ValueError("start_time 和 end_time 必须同时提供或同时省略。")
     if mode == "section" and start_time is None:
@@ -28,18 +34,23 @@ def video_url_to_tensor(
     downloaded = download_video(
         url, output_dir, mode=mode, max_height=max_height, **section_args
     )
+    decode_options = {"before_decode": before_decode} if before_decode is not None else {}
     try:
         if mode == "section":
             if downloaded.video_info is None:
                 raise RuntimeError("下载结果缺少已验证的片段元信息。")
             # 下载片段已归零，不能再用原视频的 4800–4830 秒索引。
-            clip = read_video_clip(downloaded.path, 0, downloaded.video_info.duration_seconds)
+            clip = read_video_clip(downloaded.path, 0, downloaded.video_info.duration_seconds, **decode_options)
         elif start_time is None:
             # 从实际视频流时长确定终点，不依赖网站可能缺失的时长信息。
             duration = inspect_video(downloaded.path).duration_seconds
-            clip = read_video_clip(downloaded.path, 0, duration)
+            clip = read_video_clip(downloaded.path, 0, duration, **decode_options)
         else:
-            clip = read_video_clip(downloaded.path, start_time, end_time)
+            clip = read_video_clip(downloaded.path, start_time, end_time, **decode_options)
+    except MemoryError as exc:
+        raise RuntimeError(
+            f"视频已下载，但解码时内存不足；保留的本地文件：{downloaded.path}"
+        ) from exc
     except (ImportError, OSError, RuntimeError, ValueError) as exc:
         raise RuntimeError(
             f"视频已下载，但 Tensor 解码失败：{exc}\n保留的本地文件：{downloaded.path}"

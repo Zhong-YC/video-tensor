@@ -6,6 +6,7 @@ import sys
 
 from batch import run_batch
 from batch_decoder import run_batch_decode
+from decode_guard import DecodeCancelled, add_decode_guard_arguments, make_cli_decode_decision
 from decoder import print_clip_summary, read_video_clip
 from downloader import download_video
 from pipeline import video_url_to_tensor
@@ -43,6 +44,8 @@ def main() -> int:
     local.add_argument("video_path", type=Path)
     local.add_argument("--start-time", type=float, help="可选：开始秒数；省略两个时间参数时解码全部")
     local.add_argument("--end-time", type=float, help="可选：结束秒数；与 --start-time 同时提供")
+    for command in (remote, local, decode_batch):
+        add_decode_guard_arguments(command)
     args = parser.parse_args()
 
     if args.command == "download":
@@ -62,10 +65,14 @@ def main() -> int:
             decode_batch.error("--full-start-time 和 --full-end-time 必须同时提供。")
 
     try:
+        decision = None
+        if args.command in {"local", "decode-batch"} or (args.command == "download" and args.decode):
+            decision = make_cli_decode_decision(args.warn_memory_gib, args.large_decode_action)
         if args.command == "decode-batch":
             summary = run_batch_decode(
                 args.results_file,
                 full_start_time=args.full_start_time, full_end_time=args.full_end_time,
+                before_decode=decision,
             )
             print(
                 f"\n批量解码汇总：成功 {summary.succeeded}，失败 {summary.failed}，"
@@ -81,13 +88,15 @@ def main() -> int:
             print(f"结果文件：{result.summary_path}")
             return result.exit_code
         if args.command == "local":
-            print_clip_summary(read_video_clip(args.video_path, args.start_time, args.end_time))
+            print_clip_summary(read_video_clip(
+                args.video_path, args.start_time, args.end_time, before_decode=decision,
+            ))
             return 0
         clip = None
         if args.decode:
             processed = video_url_to_tensor(
                 args.url, args.start_time, args.end_time, args.output_dir,
-                mode=args.mode, max_height=args.max_height,
+                mode=args.mode, max_height=args.max_height, before_decode=decision,
             )
             result, clip = processed.download, processed.clip
         else:
@@ -105,6 +114,12 @@ def main() -> int:
         if clip is not None:
             print("以下时间相对于下载片段起点：" if result.mode == "section" else "以下时间相对于完整视频起点：")
             print_clip_summary(clip)
+    except DecodeCancelled as exc:
+        print(str(exc))
+        return 130
+    except MemoryError:
+        print("错误：解码时内存不足；已下载的视频文件保留。", file=sys.stderr)
+        return 1
     except (ImportError, ValueError, OSError, RuntimeError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1

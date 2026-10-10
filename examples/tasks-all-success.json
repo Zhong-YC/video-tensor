@@ -2,8 +2,7 @@
   "tasks": [
     {
       "id": "short-full",
-      "url": "https://www.w3schools.com/html/mov_bbb.mp4",
-      "mode": "full"
+      "url": "https://www.w3schools.com/html/mov_bbb.mp4"
     },
     {
       "id": "short-section",

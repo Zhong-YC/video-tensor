@@ -1,6 +1,6 @@
 # video-tensor
 
-**当前版本：MVP v0.21** · **已验证：Windows 11 x64 / Python 3.12.2**
+**当前版本：MVP v0.22** · **已验证：Windows 11 x64 / Python 3.12.2**
 
 将在线视频或本地视频解码为 PyTorch 视频 Tensor。支持完整下载、在线指定区间下载、本地整段或指定区间解码、串行批量下载，以及读取下载汇总批量解码。
 
@@ -8,7 +8,9 @@
 
 批量流程：任务清单 → 串行下载 → results.json → 串行解码 → 逐条生成 Tensor。
 
-默认行为：未指定起止时间时，下载完整视频，解码整个目标文件；已下载的区间片段则解码整个片段。单视频下载的模式默认为 `full`，批量下载清单需填写 `"mode": "full"`。主动选择 `section` 区间下载时，仍需成对填写起止时间。
+默认行为：未指定起止时间时，下载完整视频，解码整个目标文件；已下载的区间片段则解码整个片段。单视频命令、Python 下载解码 API 和批量任务的模式均默认为 `full`，无需填写起止时间。主动选择 `section` 区间下载时，仍需成对填写起止时间。
+
+解码前按本次实际区间估计像素 Tensor 内存。终端默认达到 2 GiB 时提醒并询问是否取消；Python API 通过可选回调由调用方决定，不等待键盘输入。详见第 4.6、5.5 节。
 
 ## Quick Start
 
@@ -27,7 +29,7 @@ python -m venv .venv
 **单个短视频：完整下载后，将全部内容解码为 Tensor。**
 
 ```powershell
-.\.venv\Scripts\python.exe main.py download "https://www.w3schools.com/html/mov_bbb.mp4" --mode full --decode
+.\.venv\Scripts\python.exe main.py download "https://www.w3schools.com/html/mov_bbb.mp4" --decode
 ```
 
 预期：完整下载 10 秒视频，输出 `shape=(250, 3, 176, 320)`、`dtype=torch.uint8`；Tensor 时间戳为 0–9.96 秒。需要仅下载片段时，使用第 4.1 节的 `section` 命令。
@@ -55,6 +57,7 @@ video-tensor/
 ├── main.py                 # 统一入口：download / local / batch / decode-batch
 ├── downloader.py           # 完整下载、在线指定区间下载
 ├── decoder.py              # 本地视频元信息、帧与区间 Tensor
+├── decode_guard.py         # 解码内存估计类型、终端提醒与确认
 ├── pipeline.py             # 串联单视频下载与解码
 ├── batch.py                # 下载清单校验、串行执行、下载结果汇总
 ├── batch_decoder.py        # 读取下载汇总，逐条生成 Tensor
@@ -151,13 +154,13 @@ python -c "import sys; print(sys.executable)"
 **完整下载视频，只保存视频文件：**
 
 ```powershell
-.\.venv\Scripts\python.exe main.py download "URL" --mode full
+.\.venv\Scripts\python.exe main.py download "URL"
 ```
 
 **完整下载视频，再将全部内容解码为 Tensor：**
 
 ```powershell
-.\.venv\Scripts\python.exe main.py download "URL" --mode full --decode
+.\.venv\Scripts\python.exe main.py download "URL" --decode
 ```
 
 **完整下载视频，再解码原视频的 2–5 秒：**
@@ -192,6 +195,8 @@ python -c "import sys; print(sys.executable)"
 | `--end-time` | 与开始时间成对提供 | 原视频的结束秒数，不包含终点；必须大于开始时间 |
 | `--decode` | 可选开关，默认关闭 | 下载后生成 Tensor：full 不填时间时解码全部，填写时间时解码指定区间；section 解码整个下载片段。开关无需填写 true/false |
 | `--max-height` | 可选，默认不设置高度上限 | 正整数，选择高度不超过该值的源视频格式，不进行缩放 |
+| `--warn-memory-gib` | 可选，默认 `2` | 预计像素 Tensor 内存达到此 GiB 值时提醒；必须为正的有限数值，支持小数，见第 4.6 节 |
+| `--large-decode-action` | 可选，默认 `ask` | 达到阈值后：ask 询问是否取消；continue 提醒后继续；skip 提醒后取消当前解码，见第 4.6 节 |
 | `--output-dir` | 可选，默认项目内 `work/downloads` | 输出目录，可使用相对路径或绝对路径；不存在时创建 |
 | `-h / --help` | 可选开关 | 显示该子命令的用法，不执行下载 |
 
@@ -226,6 +231,8 @@ python -c "import sys; print(sys.executable)"
 | `video_path` | 必填位置参数 | 已有本地视频文件；相对路径以当前终端目录为基准 |
 | `--start-time` | 可选，与结束时间成对填写 | 相对于该文件视频流起点的开始秒数，包含起点；两个时间参数均省略时解码全部 |
 | `--end-time` | 可选，与开始时间成对填写 | 相对于该文件视频流起点的结束秒数，不包含终点 |
+| `--warn-memory-gib` | 可选，默认 `2` | 预计像素 Tensor 内存达到此 GiB 值时提醒；必须为正的有限数值，支持小数，见第 4.6 节 |
+| `--large-decode-action` | 可选，默认 `ask` | 达到阈值后：ask 询问是否取消；continue 提醒后继续；skip 提醒后取消当前解码，见第 4.6 节 |
 | `-h / --help` | 可选开关 | 显示用法 |
 
 两个时间参数同时省略时解码全部；若指定区间则必须成对填写，支持小数，须满足合法区间且不超过文件时长。在线区间下载后的片段已归零：原视频 4800–4830 秒对应本地约 0–30 秒，不能再次使用 4800–4830 秒解码该文件。
@@ -262,7 +269,7 @@ python -c "import sys; print(sys.executable)"
 
 **完整下载后解码全部内容：**
 
-先使用第 4.3 节的 `batch` 下载，清单中的任务填写 `"mode": "full"`；再运行：
+先使用第 4.3 节的 `batch` 下载，清单中的完整下载任务可省略 `mode`，或填写 `"mode": "full"`；再运行：
 
 ```powershell
 .\.venv\Scripts\python.exe main.py decode-batch "results.json完整路径"
@@ -281,6 +288,8 @@ python -c "import sys; print(sys.executable)"
 | `results_file` | 必填位置参数 | `batch` 生成的下载汇总文件；不能填写下载前的 `tasks.json` |
 | `--full-start-time` | 可选，两个时间参数均省略时解码全部 | 所有成功 full 任务的解码开始秒数，相对于各自文件起点 |
 | `--full-end-time` | 可选，与开始时间成对填写 | full 任务的解码结束秒数，不包含终点；每个文件都须覆盖这个区间 |
+| `--warn-memory-gib` | 可选，默认 `2` | 预计像素 Tensor 内存达到此 GiB 值时提醒；必须为正的有限数值，支持小数，见第 4.6 节 |
+| `--large-decode-action` | 可选，默认 `ask` | 达到阈值后：ask 询问是否取消；continue 提醒后继续；skip 提醒后取消当前解码，见第 4.6 节 |
 | `-h / --help` | 可选开关 | 显示用法 |
 
 两个 `--full-*` 参数只影响 full 任务；section 任务始终解码整个已下载片段。填写时必须成对，支持小数，满足合法区间。用户可以选择短区间、长区间或全部内容，程序不设固定时长上限。
@@ -317,7 +326,57 @@ download "https://www.w3schools.com/html/mov_bbb.mp4" --mode section --start-tim
 .\.venv\Scripts\python.exe decoder.py "本地视频完整路径.mp4" --start-time 2 --end-time 5
 ```
 
-需要单独检查第一帧时，Python 代码仍可调用 `read_first_frame(path)`。该调试入口接收必填位置参数 `video_path`、可选成对参数 `--start-time / --end-time`，以及 `-h / --help`。日常使用统一入口 `main.py`。
+需要单独检查第一帧时，Python 代码仍可调用 `read_first_frame(path)`。该调试入口接收必填位置参数 `video_path`、可选成对参数 `--start-time / --end-time`、第 4.6 节的 `--warn-memory-gib / --large-decode-action`，以及 `-h / --help`。日常使用统一入口 `main.py`。
+
+### 4.6 解码前内存提醒与确认
+
+适用于 `download --decode`、`local`、`decode-batch` 和独立 `decoder.py`。仅下载时不触发解码提醒；`batch` 是下载命令，其下载 JSON 中不填写这两个解码参数。
+
+判断的是**本次实际要解码的内容**：完整文件按全部帧估计；指定区间按区间内的帧估计；section 下载结果按下载好的本地片段估计。源视频很长但只解码短片段时，不会仅因源视频时长而提醒。短片段若分辨率或帧数很高，仍可能触发提醒。
+
+估算当前 RGB uint8 输出的像素内存：`T × 3 × H × W` 字节，`1 GiB = 1024³` 字节。帧数按真实时间戳确定，支持可变帧率，不用平均 FPS 简单推算。建立索引及必要的少量单帧读取在提醒前进行；整个区间的像素 Tensor 在确认后才批量生成。
+
+默认阈值为 **2 GiB**，预计内存达到阈值时输出视频路径、实际请求区间、帧数、尺寸和预计像素内存，并提醒继续可能导致内存不足、系统变慢或程序异常退出。该数值仅估计输出像素，不包括解码器、时间戳、临时副本等开销；实际峰值可能更高，也不代表机器当前可用内存。
+
+默认确认问题为：
+
+```text
+是否取消本次解码？[y/n]（y=取消，n=继续）：
+```
+
+- `y / yes`：取消当前项。单视频停止解码并返回退出码 130；批量解码记为 skipped，说明原因后继续下一项，不记为失败。
+- `n / no`：继续解码。两种回答均不区分大小写。
+- 空输入或其他回答：重新询问，不自动选择。
+- 输入结束或无法读取输入：取消当前项。无人值守运行应显式选择 continue 或 skip。
+- `Ctrl+C`：停止整个操作；批量处理不再解码后续项，退出码为 130。
+
+取消解码时保留已有视频文件，批量解码也不修改原 `results.json`。跳过单项与取消整批是不同操作，批量汇总会分别体现。
+
+**调整提醒阈值：达到 1 GiB 时询问。**
+
+```powershell
+.\.venv\Scripts\python.exe main.py local "本地视频完整路径.mp4" --warn-memory-gib 1
+```
+
+**明确提醒后继续，不等待输入：**
+
+```powershell
+.\.venv\Scripts\python.exe main.py download "URL" --mode full --decode --warn-memory-gib 2 --large-decode-action continue
+```
+
+**批量解码时跳过达到阈值的项，其他项仍正常解码：**
+
+```powershell
+.\.venv\Scripts\python.exe main.py decode-batch "下载结果的results.json完整路径" --warn-memory-gib 2 --large-decode-action skip
+```
+
+**独立调试入口同样支持确认；下面只判断本地 2–5 秒的内存：**
+
+```powershell
+.\.venv\Scripts\python.exe decoder.py "本地视频完整路径.mp4" --start-time 2 --end-time 5 --warn-memory-gib 2 --large-decode-action ask
+```
+
+`continue / skip` 仅改变达到阈值时的行为；低于阈值的项直接解码。默认操作范围仍遵循“不指定时间则处理全部”，提醒不会自动截短视频。
 
 ## 5. 任务清单、输出与 Python 使用
 
@@ -330,8 +389,7 @@ download "https://www.w3schools.com/html/mov_bbb.mp4" --mode section --start-tim
   "tasks": [
     {
       "id": "short-full",
-      "url": "https://www.w3schools.com/html/mov_bbb.mp4",
-      "mode": "full"
+      "url": "https://www.w3schools.com/html/mov_bbb.mp4"
     },
     {
       "id": "long-section",
@@ -350,12 +408,12 @@ download "https://www.w3schools.com/html/mov_bbb.mp4" --mode section --start-tim
 | `tasks` | 必填 | 非空任务数组；顶层只接受此字段 |
 | `id` | 每项必填 | 唯一的非空字符串，用于在汇总中识别任务 |
 | `url` | 每项必填 | 单个视频的 HTTP(S) 网页 URL 或媒体直链 |
-| `mode` | 每项必填 | 明确填写 `full` 或 `section`，没有隐含默认模式 |
+| `mode` | 可选，默认 `full` | 省略时完整下载；区间下载必须明确填写 `section`，不根据时间字段自动切换模式 |
 | `start_time` | section 必填 | 原视频开始秒数，JSON 数值，不是字符串 |
 | `end_time` | section 必填 | 原视频结束秒数，须大于开始时间 |
 | `max_height` | 可选 | 正整数，含义与 download 的同名参数相同 |
 
-full 任务不填写时间字段；其解码区间在 decode-batch 阶段选择。不接受未定义字段。标准 JSON 使用双引号，不支持注释或末尾多余逗号。两份现成示例的详细说明见 [examples/README.md](examples/README.md)。
+full 任务可以省略时间字段，或将两个时间留空（JSON `null`）；其解码区间在 decode-batch 阶段选择。只有一个有效时间时会报错；section 必须提供两个有效数值。full 不接受有效的下载区间，填写两个时间值时仍须明确选择 section。不接受未定义字段。标准 JSON 使用双引号，不支持注释或末尾多余逗号。两份现成示例的详细说明见 [examples/README.md](examples/README.md)。
 
 ### 5.2 输出文件与时间轴
 
@@ -406,12 +464,38 @@ video_tensor = clip.data
 
 需要区间时，传入 `start_time=2, end_time=5`；两个时间参数同时省略则处理整个文件。
 
-单视频下载并解码所选区间：
+单视频完整下载并整段解码：
 
 ```python
 from pathlib import Path
 from pipeline import video_url_to_tensor
 
+result = video_url_to_tensor(
+    url="https://www.w3schools.com/html/mov_bbb.mp4",
+    output_dir=Path("work/downloads"),
+)
+video_tensor = result.clip.data
+timestamps = result.clip.pts_seconds
+local_video = result.download.path
+```
+
+该 API 的 `mode` 默认为 `full`，`start_time`、`end_time` 默认为 `None`。`output_dir` 也可省略，默认项目内 `work/downloads`，因此 `video_url_to_tensor(url)` 即可完成完整下载与整段解码。
+
+完整下载后，仅解码原视频的 2–5 秒：
+
+```python
+result = video_url_to_tensor(
+    url="https://www.w3schools.com/html/mov_bbb.mp4",
+    start_time=2,
+    end_time=5,
+    output_dir=Path("work/downloads"),
+)
+video_tensor = result.clip.data
+```
+
+只下载原视频 2–5 秒，再解码整个下载片段：
+
+```python
 result = video_url_to_tensor(
     url="https://www.w3schools.com/html/mov_bbb.mp4",
     start_time=2,
@@ -420,22 +504,9 @@ result = video_url_to_tensor(
     mode="section",
 )
 video_tensor = result.clip.data
-timestamps = result.clip.pts_seconds
-local_video = result.download.path
 ```
 
-该 API 的 `mode` 默认是 `section`；明确传入 `mode="full"` 则先完整下载，再解码传入区间，时间戳相对于完整视频流起点。完整下载后整段解码时，将两个时间参数同时传为 `None`：
-
-```python
-result = video_url_to_tensor(
-    url="https://www.w3schools.com/html/mov_bbb.mp4",
-    start_time=None,
-    end_time=None,
-    output_dir=Path("work/downloads"),
-    mode="full",
-)
-video_tensor = result.clip.data
-```
+两个时间参数可同时省略或同时传入 `None`；只提供一个有效时间会报错。显式选择 section 时必须填写两个有效时间。full 解码时间相对于完整视频起点，section 解码时间相对于下载片段起点。
 
 读取下载汇总，逐条取得 Tensor，默认解码全部内容：
 
@@ -458,6 +529,71 @@ for item in iter_decoded_results(
 
 如果只需 full 视频的部分内容，向 `iter_decoded_results` 选填 `full_start_time=2, full_end_time=5`。生成器通过 yield 一次交出一项，调用方继续迭代时才处理下一项，类似 Java Iterator；避免将所有返回项放进列表而累积多个视频的 Tensor。
 
+### 5.5 Python API 的解码决策回调
+
+`read_video_clip()`、`video_url_to_tensor()`、`iter_decoded_results()` 和 `run_batch_decode()` 均接收可选 `before_decode` 回调。API 默认不读取终端输入，也不自动弹出确认；未提供回调时仍按原规则解码全部或指定区间。
+
+回调在整批像素 Tensor 分配前收到 `DecodeEstimate`，包含 `video_path`、`start_time`、`end_time`、`num_frames`、`height`、`width`、`pixel_bytes` 和 `pixel_gib`。其时间轴相对于实际本地文件的起点；在线 section 片段通常从 0 开始。回调对每个待解码项调用，阈值及是否继续由调用方决定：**返回 True 继续，False 取消当前项**。
+
+例如，调用方选择跳过预计像素内存达到 2 GiB 的视频：
+
+```python
+from pathlib import Path
+from decode_guard import DecodeCancelled, DecodeEstimate
+from decoder import read_video_clip
+
+def approve_decode(estimate: DecodeEstimate) -> bool:
+    if estimate.pixel_gib >= 2:
+        print(f"跳过 {estimate.video_path}：预计像素内存 {estimate.pixel_gib:.3f} GiB")
+        return False
+    return True
+
+try:
+    clip = read_video_clip(
+        Path("本地视频完整路径.mp4"),
+        before_decode=approve_decode,
+    )
+    video_tensor = clip.data
+except DecodeCancelled as exc:
+    print(exc)
+```
+
+下载并解码时同样传入回调，取消解码后已下载视频保留：
+
+```python
+from pipeline import video_url_to_tensor
+
+try:
+    result = video_url_to_tensor(
+        url="https://www.w3schools.com/html/mov_bbb.mp4",
+        before_decode=approve_decode,
+    )
+    video_tensor = result.clip.data
+except DecodeCancelled as exc:
+    print(exc)
+```
+
+批量 API 将拒绝项返回为 `status="skipped"`，原因在 `skip_reason`，后续项继续处理：
+
+```python
+from batch_decoder import iter_decoded_results
+
+for item in iter_decoded_results(
+    Path("下载结果的results.json完整路径"),
+    before_decode=approve_decode,
+):
+    if item.clip is not None:
+        print(item.entry.id, item.clip.data.shape)
+        # 在这里使用当前 Tensor，不累积所有项。
+    elif item.skip_reason:
+        print(item.entry.id, item.skip_reason)
+    elif item.error:
+        print(item.entry.id, item.error)
+    del item
+```
+
+单视频拒绝通过 `DecodeCancelled` 与解码失败区分；回调可由训练程序、服务或其他调用方制定自己的策略，无需键盘交互。
+
 ## 6. 当前行为、边界与验证
 
 ### 在线区间下载的支持范围
@@ -475,7 +611,9 @@ for item in iter_decoded_results(
 
 按真实帧起始时间戳选择 `[start_time, end_time)` 内的帧，支持可变帧率，不用平均 FPS 推算帧号或复制帧。区间内没有帧起点时会报错，越界不自动截短；帧不可分割，最后一帧的持续时间可能跨过终点。
 
-单个目标视频或片段整体解码到内存。批量 CLI 处理完一项后释放引用，再处理下一项；长视频的内存需求随帧数和分辨率增加，是否能全部解码取决于可用内存。原分辨率、帧数和 uint8 像素保持不变，不自动采样、缩放或归一化。
+单个目标视频或片段整体解码到内存。批量 CLI 处理完一项后释放引用，再处理下一项；长视频的内存需求随帧数和分辨率增加，是否能全部解码取决于可用内存。终端按第 4.6 节提醒并允许取消，API 可使用第 5.5 节的回调；这不保证解码一定不会内存不足。原分辨率、帧数和 uint8 像素保持不变，不自动采样、缩放或归一化。
+
+捕获到可恢复的 MemoryError 或 PyTorch / TorchCodec RuntimeError 时输出错误，批量解码继续后续项，已有文件保留。若操作系统直接结束进程，程序无法捕获或保证继续；当前未实现分块解码。
 
 Tensor 在内存中生成，命令行打印摘要，Python 调用可直接使用实际 Tensor；当前不自动保存 `.pt` 文件，程序退出后内存中的 Tensor 不再保留。
 
@@ -492,10 +630,10 @@ Tensor 在内存中生成，命令行打印摘要，Python 调用可直接使用
 
 | 退出码 | 含义 |
 | --- | --- |
-| 0 | 当前操作成功；批量解码允许跳过原下载失败项，全部跳过时也会输出计数 |
+| 0 | 当前操作成功；批量解码允许跳过原下载失败项或主动拒绝项，全部跳过时也会输出计数 |
 | 1 | 处理失败、清单内容或 JSON 无效，或本次批量处理含失败项 |
 | 2 | 命令行参数缺失或组合错误 |
-| 130 | 用户手动取消 |
+| 130 | 单视频取消解码（包括 skip 或输入结束），或 Ctrl+C 停止整个操作；批量仅跳过当前项不使用此退出码 |
 
 ### 自动测试
 
@@ -503,11 +641,21 @@ Tensor 在内存中生成，命令行打印摘要，Python 调用可直接使用
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-现有 29 个测试方法覆盖本地解码、真实 FFmpeg HTTP Range 区间下载、片段时间轴、对应帧转码误差、范围请求与传输量、异常片段拒绝和清理；还覆盖批量预检查、失败继续、取消、重复运行，以及完整视频默认整段 / 可选区间、损坏或缺失文件、相对路径、UTF-8 BOM、Tensor 引用释放和 CLI 集成。
+现有 44 个测试方法覆盖本地解码、真实 FFmpeg HTTP Range 区间下载、片段时间轴、对应帧转码误差、范围请求与传输量、异常片段拒绝和清理；还覆盖批量预检查、失败继续、取消、重复运行，以及完整视频默认整段 / 可选区间、损坏或缺失文件、相对路径、UTF-8 BOM、Tensor 引用释放和 CLI 集成。
+
+新增验证包括预计帧数 / 像素内存与真实 Tensor 一致（含可变帧率和非零流起点）、达到阈值提醒、短区间不触发、yes 取消 / no 继续、空输入重询问、无输入的处理、API 不读取键盘、取消前不分配整批像素、文件保留、批量中间跳过后继续，以及可恢复的内存分配失败。不通过分配数小时视频 Tensor 或耗尽本机内存来测试。
 
 自动测试在 work 内临时生成视频，结束后清理，无需访问外部网站；FFmpeg 须在 PATH 中。公网示例依赖网站及网络可用性。
 
 ## 版本记录
+
+### MVP v0.22
+
+- 修复 `video_url_to_tensor()` 的默认参数：省略起止时间和 mode 时，完整下载并整段解码；输出目录默认项目内 work/downloads。
+- 批量清单及 DownloadTask 默认使用 full；时间字段省略或 null 均表示未指定时间，结果汇总仍明确记录实际模式。
+- 新增按实际解码内容估计像素内存，终端默认达到 2 GiB 时提醒并询问是否取消；支持调整阈值及无人值守 continue / skip 策略。
+- Python API 新增 before_decode 回调，由调用方决定是否继续；单项取消保留视频，批量跳过并继续后续项。
+- 增加默认行为、解码提醒、取消及内存异常回归测试，共 44 项测试；同步更新使用示例和参数说明。
 
 ### MVP v0.21
 
@@ -515,7 +663,7 @@ Tensor 在内存中生成，命令行打印摘要，Python 调用可直接使用
 - 修复 `decoder.py` 不填时间时只读取第一帧的行为：现在默认解码整个文件。
 - `read_video_clip(path)` 支持省略时间参数，直接返回整段视频 Tensor；指定成对时间时仍按区间解码。
 - 明确默认规则：完整下载、下载后整段解码和批量整段解码均无需填写时间；主动选择 section 区间下载时仍须填写起止时间。只填写一个时间参数会报错。
-- 补充默认整段解码的像素与命令行回归测试，29 项测试通过；同步更新使用示例和参数说明。
+- 补充本地默认整段解码的像素与命令行回归测试，29 项测试通过；同步更新使用说明。
 
 ### MVP v0.2
 
