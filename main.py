@@ -39,10 +39,10 @@ def main() -> int:
     decode_batch.add_argument(
         "--full-end-time", type=float, help="可选：full 任务的解码结束秒数；与 --full-start-time 同时提供，section 仍解码整段",
     )
-    local = commands.add_parser("local", help="复用本地视频，按时间提取 Tensor")
+    local = commands.add_parser("local", help="复用本地视频，默认整段或按区间提取 Tensor")
     local.add_argument("video_path", type=Path)
-    local.add_argument("--start-time", type=float, required=True)
-    local.add_argument("--end-time", type=float, required=True)
+    local.add_argument("--start-time", type=float, help="可选：开始秒数；省略两个时间参数时解码全部")
+    local.add_argument("--end-time", type=float, help="可选：结束秒数；与 --start-time 同时提供")
     args = parser.parse_args()
 
     if args.command == "download":
@@ -52,6 +52,10 @@ def main() -> int:
             remote.error("section 区间下载必须指定起止时间。")
         if args.mode == "full" and args.start_time is not None and not args.decode:
             remote.error("full 模式的时间参数仅用于 --decode；下载片段请选 --mode section。")
+
+    if args.command == "local":
+        if (args.start_time is None) != (args.end_time is None):
+            local.error("--start-time 和 --end-time 必须同时提供或同时省略。")
 
     if args.command == "decode-batch":
         if (args.full_start_time is None) != (args.full_end_time is None):

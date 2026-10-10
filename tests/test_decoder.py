@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -51,8 +52,39 @@ class VideoClipTests(unittest.TestCase):
                     self.assertEqual(clip.data.dtype, torch.uint8)
                     self.assertEqual(tuple(clip.data.shape[1:]), (3, 48, 64))
 
+    def test_default_whole_video_matches_all_indexed_frames(self):
+        for path in self.paths:
+            with self.subTest(video=path.stem):
+                decoder = VideoDecoder(str(path), device='cpu')
+                expected = decoder.get_frames_at(list(range(len(decoder))))
+                for clip in (read_video_clip(path), read_video_clip(path, None, None)):
+                    self.assertTrue(torch.equal(clip.data, expected.data))
+                    self.assertTrue(torch.allclose(clip.pts_seconds, expected.pts_seconds - decoder.metadata.begin_stream_seconds))
+                    self.assertEqual(clip.start_time, 0)
+                    self.assertAlmostEqual(clip.end_time, 1)
+                    self.assertEqual(clip.data.dtype, torch.uint8)
+
+    def test_local_cli_and_decoder_cli_default_whole_and_optional_range(self):
+        root = Path(__file__).resolve().parents[1]
+        for entry in (['main.py', 'local'], ['decoder.py']):
+            command = [sys.executable, '-X', 'utf8', *entry, str(self.paths[0])]
+            for flags, expected in (
+                ([], '(10, 3, 48, 64)'),
+                (['--start-time', '0.2', '--end-time', '0.5'], '(3, 3, 48, 64)'),
+                (['--start-time', '0.2'], None),
+                (['--end-time', '0.5'], None),
+            ):
+                with self.subTest(entry=entry, flags=flags):
+                    result = subprocess.run(command + flags, cwd=root, capture_output=True, encoding='utf-8', timeout=30)
+                    self.assertEqual(result.returncode, 0 if expected else 2, result.stdout + result.stderr)
+                    if expected:
+                        self.assertIn(expected, result.stdout)
+                        self.assertIn('torch.uint8', result.stdout)
+                    else:
+                        self.assertIn('必须同时提供', result.stderr)
+
     def test_invalid_ranges(self):
-        for start, end in [(-1, 1), (0, 0), (1, 0), (0, 2), (float("nan"), 1), (0, float("inf"))]:
+        for start, end in [(None, 1), (0, None), (-1, 1), (0, 0), (1, 0), (0, 2), (float("nan"), 1), (0, float("inf"))]:
             with self.subTest(start=start, end=end):
                 with self.assertRaises(ValueError):
                     read_video_clip(self.paths[0], start, end)

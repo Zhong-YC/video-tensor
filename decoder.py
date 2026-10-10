@@ -1,4 +1,4 @@
-"""本地视频解码：第一帧或指定时间区间的 Tensor。"""
+"""本地视频解码：默认整段，也可指定时间区间；保留首帧检查 API。"""
 
 from __future__ import annotations
 
@@ -108,9 +108,14 @@ def validate_time_range(start_time: float, end_time: float) -> None:
         raise ValueError("时间区间必须满足 0 <= start_time < end_time。")
 
 
-def read_video_clip(video_path: Path, start_time: float, end_time: float) -> VideoClip:
-    """按相对视频流起点的秒数取 [start_time, end_time) 内开始显示的帧。"""
-    validate_time_range(start_time, end_time)
+def read_video_clip(
+    video_path: Path, start_time: float | None = None, end_time: float | None = None,
+) -> VideoClip:
+    """不传时间时读取整段；传入成对时间时按视频流相对起点选择区间。"""
+    if (start_time is None) != (end_time is None):
+        raise ValueError("start_time 和 end_time 必须同时提供或同时省略。")
+    if start_time is not None:
+        validate_time_range(start_time, end_time)
     decoder = _open_decoder(video_path)
     metadata = decoder.metadata
     begin = metadata.begin_stream_seconds
@@ -118,6 +123,10 @@ def read_video_clip(video_path: Path, start_time: float, end_time: float) -> Vid
     if begin is None or end is None:
         raise RuntimeError("无法确定视频流的起止时间。")
     duration = end - begin
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError("无法确定有效的视频流时长。")
+    if start_time is None:
+        start_time, end_time = 0.0, duration
     if end_time > duration:
         raise ValueError(f"end_time={end_time} 超过视频流时长 {duration} 秒；不会自动截短。")
 
@@ -155,19 +164,16 @@ def print_clip_summary(clip: VideoClip) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="用 TorchCodec 读取第一帧或指定时间区间。")
+    parser = argparse.ArgumentParser(description="用 TorchCodec 解码整个视频，或指定时间区间。")
     parser.add_argument("video_path", type=Path, help="本地视频文件路径")
-    parser.add_argument("--start-time", type=float, help="相对视频流起点的开始秒数，包含")
+    parser.add_argument("--start-time", type=float, help="可选：相对视频流起点的开始秒数，包含；省略两个时间参数时解码全部")
     parser.add_argument("--end-time", type=float, help="相对视频流起点的结束秒数，不包含")
     args = parser.parse_args()
     if (args.start_time is None) != (args.end_time is None):
         parser.error("--start-time 和 --end-time 必须同时提供。")
     try:
-        if args.start_time is not None:
-            clip = read_video_clip(args.video_path, args.start_time, args.end_time)
-            print_clip_summary(clip)
-            return 0
-        result = read_first_frame(args.video_path)
+        clip = read_video_clip(args.video_path, args.start_time, args.end_time)
+        print_clip_summary(clip)
     except (ImportError, OSError, RuntimeError, ValueError) as exc:
         print(f"解码失败：{exc}", file=sys.stderr)
         return 1
@@ -175,16 +181,6 @@ def main() -> int:
         print("\n解码已取消。", file=sys.stderr)
         return 130
 
-    print("第一帧解码成功")
-    print(f"编码：{result.codec}")
-    print(f"视频帧数：{result.num_frames}")
-    print(f"视频流时长（秒）：{result.duration_seconds}")
-    print(f"平均帧率：{result.average_fps}")
-    print(f"Tensor shape [C, H, W]：{tuple(result.data.shape)}")
-    print(f"Tensor dtype：{result.data.dtype}")
-    print(f"Tensor device：{result.data.device}")
-    print(f"第一帧时间戳（秒）：{result.pts_seconds}")
-    print(f"第一帧持续时间（秒）：{result.frame_duration_seconds}")
     return 0
 
 

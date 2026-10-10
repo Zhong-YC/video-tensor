@@ -1,12 +1,14 @@
 # video-tensor
 
-**当前版本：MVP v0.2** · **已验证：Windows 11 x64 / Python 3.12.2**
+**当前版本：MVP v0.21** · **已验证：Windows 11 x64 / Python 3.12.2**
 
-将在线视频或本地视频解码为 PyTorch 视频 Tensor。支持完整下载、在线指定区间下载、本地指定区间解码、串行批量下载，以及读取下载汇总批量解码。
+将在线视频或本地视频解码为 PyTorch 视频 Tensor。支持完整下载、在线指定区间下载、本地整段或指定区间解码、串行批量下载，以及读取下载汇总批量解码。
 
 单任务流程：URL → yt-dlp 下载 → TorchCodec 解码 → Tensor。
 
 批量流程：任务清单 → 串行下载 → results.json → 串行解码 → 逐条生成 Tensor。
+
+默认行为：未指定起止时间时，下载完整视频，解码整个目标文件；已下载的区间片段则解码整个片段。单视频下载的模式默认为 `full`，批量下载清单需填写 `"mode": "full"`。主动选择 `section` 区间下载时，仍需成对填写起止时间。
 
 ## Quick Start
 
@@ -140,7 +142,7 @@ python -c "import sys; print(sys.executable)"
 | 子命令 | 用途 | 主要输出 |
 | --- | --- | --- |
 | `download` | 单个在线视频完整下载或区间下载，可接着解码 | 视频路径；开启解码时输出 Tensor 摘要 |
-| `local` | 已有本地视频按时间区间解码 | Tensor 摘要 |
+| `local` | 已有本地视频默认整段或指定区间解码 | Tensor 摘要 |
 | `batch` | 根据 JSON 清单串行下载多个任务 | 视频文件、逐项状态和 `results.json` |
 | `decode-batch` | 根据下载汇总串行解码成功项 | 每项 Tensor 摘要和解码计数 |
 
@@ -199,28 +201,34 @@ python -c "import sys; print(sys.executable)"
 
 `--max-height` 依赖网站提供的格式尺寸信息；无匹配格式或尺寸未知时可能失败，不会静默选择更高分辨率。未设置时由 yt-dlp 选择最佳视频格式。
 
-### 4.2 已有本地视频按区间解码：local
+### 4.2 已有本地视频解码：local
 
-无需重新下载，读取已有视频的 2–5 秒：
+无需重新下载，不填写时间参数时解码整个本地文件：
+
+```powershell
+.\.venv\Scripts\python.exe main.py local "本地视频完整路径.mp4"
+```
+
+指定区间，只读取已有视频的 2–5 秒：
 
 ```powershell
 .\.venv\Scripts\python.exe main.py local "本地视频完整路径.mp4" --start-time 2 --end-time 5
 ```
 
-读取已下载的 3 秒片段，解码整个本地 0–3 秒：
+读取已下载的片段，默认解码整个片段，无需手动填写片段时长：
 
 ```powershell
-.\.venv\Scripts\python.exe main.py local "本地片段完整路径.mp4" --start-time 0 --end-time 3
+.\.venv\Scripts\python.exe main.py local "本地片段完整路径.mp4"
 ```
 
 | 参数 | 是否必填 / 默认值 | 说明 |
 | --- | --- | --- |
 | `video_path` | 必填位置参数 | 已有本地视频文件；相对路径以当前终端目录为基准 |
-| `--start-time` | 必填 | 相对于该文件视频流起点的开始秒数，包含起点 |
-| `--end-time` | 必填 | 相对于该文件视频流起点的结束秒数，不包含终点 |
+| `--start-time` | 可选，与结束时间成对填写 | 相对于该文件视频流起点的开始秒数，包含起点；两个时间参数均省略时解码全部 |
+| `--end-time` | 可选，与开始时间成对填写 | 相对于该文件视频流起点的结束秒数，不包含终点 |
 | `-h / --help` | 可选开关 | 显示用法 |
 
-两个时间参数支持小数，须满足合法区间且不超过文件时长。在线区间下载后的片段已归零：原视频 4800–4830 秒对应本地约 0–30 秒，不能再次使用 4800–4830 秒解码该文件。
+两个时间参数同时省略时解码全部；若指定区间则必须成对填写，支持小数，须满足合法区间且不超过文件时长。在线区间下载后的片段已归零：原视频 4800–4830 秒对应本地约 0–30 秒，不能再次使用 4800–4830 秒解码该文件。
 
 ### 4.3 串行批量下载：batch
 
@@ -297,7 +305,7 @@ PyCharm 运行配置的脚本选择 `main.py`，参数完整填写为：
 download "https://www.w3schools.com/html/mov_bbb.mp4" --mode section --start-time 2 --end-time 5 --decode
 ```
 
-保留 `decoder.py` 用于单独排查本地解码问题。不带时间参数时只读取第一帧：
+保留 `decoder.py` 用于单独排查本地解码问题。不带时间参数时同样解码整个文件：
 
 ```powershell
 .\.venv\Scripts\python.exe decoder.py "本地视频完整路径.mp4"
@@ -309,7 +317,7 @@ download "https://www.w3schools.com/html/mov_bbb.mp4" --mode section --start-tim
 .\.venv\Scripts\python.exe decoder.py "本地视频完整路径.mp4" --start-time 2 --end-time 5
 ```
 
-该调试入口接收必填位置参数 `video_path`、可选成对参数 `--start-time / --end-time`，以及 `-h / --help`。日常使用统一入口 `main.py`。
+需要单独检查第一帧时，Python 代码仍可调用 `read_first_frame(path)`。该调试入口接收必填位置参数 `video_path`、可选成对参数 `--start-time / --end-time`，以及 `-h / --help`。日常使用统一入口 `main.py`。
 
 ## 5. 任务清单、输出与 Python 使用
 
@@ -385,6 +393,18 @@ results.json 中成功文件通常使用绝对路径；移动文件后需修正 
 本机已验证得到 H.264 MP4、640×360、30 秒、900 帧。网站返回的格式可能随访问条件改变。该命令只下载并验证首末帧，不将整个片段创建为 Tensor。
 
 ### 5.4 Python 中取得 Tensor
+
+本地文件默认整段解码：
+
+```python
+from pathlib import Path
+from decoder import read_video_clip
+
+clip = read_video_clip(Path("本地视频完整路径.mp4"))
+video_tensor = clip.data
+```
+
+需要区间时，传入 `start_time=2, end_time=5`；两个时间参数同时省略则处理整个文件。
 
 单视频下载并解码所选区间：
 
@@ -483,11 +503,19 @@ Tensor 在内存中生成，命令行打印摘要，Python 调用可直接使用
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-现有 27 个测试方法覆盖本地解码、真实 FFmpeg HTTP Range 区间下载、片段时间轴、对应帧转码误差、范围请求与传输量、异常片段拒绝和清理；还覆盖批量预检查、失败继续、取消、重复运行，以及完整视频默认整段 / 可选区间、损坏或缺失文件、相对路径、UTF-8 BOM、Tensor 引用释放和 CLI 集成。
+现有 29 个测试方法覆盖本地解码、真实 FFmpeg HTTP Range 区间下载、片段时间轴、对应帧转码误差、范围请求与传输量、异常片段拒绝和清理；还覆盖批量预检查、失败继续、取消、重复运行，以及完整视频默认整段 / 可选区间、损坏或缺失文件、相对路径、UTF-8 BOM、Tensor 引用释放和 CLI 集成。
 
 自动测试在 work 内临时生成视频，结束后清理，无需访问外部网站；FFmpeg 须在 PATH 中。公网示例依赖网站及网络可用性。
 
 ## 版本记录
+
+### MVP v0.21
+
+- 修复 `main.py local` 强制要求起止时间的问题：省略两个时间参数时，默认解码整个本地视频。
+- 修复 `decoder.py` 不填时间时只读取第一帧的行为：现在默认解码整个文件。
+- `read_video_clip(path)` 支持省略时间参数，直接返回整段视频 Tensor；指定成对时间时仍按区间解码。
+- 明确默认规则：完整下载、下载后整段解码和批量整段解码均无需填写时间；主动选择 section 区间下载时仍须填写起止时间。只填写一个时间参数会报错。
+- 补充默认整段解码的像素与命令行回归测试，29 项测试通过；同步更新使用示例和参数说明。
 
 ### MVP v0.2
 
